@@ -44,22 +44,31 @@ def hf_generate(system_prompt: str, user_prompt: str,
 
 # =========================== Prompting ===========================
 PROMPT_SYSTEM = (
-    "You are a precise assistant. Answer ONLY using the provided context.\n"
-    "If the answer is not in the context, reply exactly: 'I could not find the answer in the textbook.'\n"
-    "Always include 1–3 inline citations in the form (source|page[#chunk]) when possible."
+    "You are a helpful, domain-agnostic RAG assistant.\n"
+    "Follow these rules strictly:\n"
+    "1) Use only the provided Context and the Conversation to interpret follow-ups.\n"
+    "2) If the answer is not in the Context, reply exactly: 'I could not find the answer in the textbook.'\n"
+    "3) Prefer precise, verifiable statements. Avoid speculation.\n"
+    "4) Keep answers concise (≈4–8 sentences) and easy to read.\n"
+    "5) Add 1–3 inline citations like (source|p#) right after the claim they support.\n"
+    "6) Think step-by-step internally but DO NOT reveal your chain-of-thought.\n"
 )
 
 PROMPT_TEMPLATE = """Context:
 {context}
 
-Task:
-- Provide a concise answer (≤ 6 sentences) strictly based on the context.
-- Use plain English.
-- Include 1–3 citations like (source|p#) when applicable.
-- If the context does not contain the answer, reply exactly:
-  "I could not find the answer in the textbook."
+Conversation:
+{conversation}
 
-Question: {question}
+Question:
+{question}
+
+Instructions:
+- Base your answer solely on the Context. Use Conversation only to disambiguate references.
+- If insufficient information, reply exactly: "I could not find the answer in the textbook."
+- Be concise, structured, and cite 1–3 sources inline like (source|p#).
+- If the user asks for content outside the Context, politely say you don't have that information.
+
 Answer:
 """
 
@@ -269,22 +278,45 @@ with ingest_tab:
                 st.error(f"Failed processing JSON: {e}")
 
 with ask_tab:
-    st.subheader("Ask a question")
-    question = st.text_area("Your question", placeholder="Ask about the ingested PDFs/JSON...", height=80)
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        go = st.button("Ask")
-    with col2:
-        st.caption("Answer will use the HF model if available; otherwise a non-LLM extractive fallback.")
+    st.subheader("Chat with your data")
 
-    if go and question.strip():
+    # Initialize chat history in session state
+    if "messages" not in st.session_state:
+        st.session_state.messages = []  # list of {role: "user"|"assistant", content: str}
+
+    # Display history
+    for m in st.session_state.messages:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"]) 
+
+    # Chat input
+    user_msg = st.chat_input("Ask about the ingested PDFs/JSON...")
+
+    if user_msg:
+        st.session_state.messages.append({"role": "user", "content": user_msg})
+        with st.chat_message("user"):
+            st.markdown(user_msg)
+
+        # Build conversation string for the LLM
+        def format_conversation(msgs: List[Dict], max_chars: int = 2000) -> str:
+            parts, total = [], 0
+            for m in msgs[-12:]:  # last 12 turns max
+                prefix = "User:" if m["role"] == "user" else "Assistant:"
+                piece = f"{prefix} {m['content']}\n"
+                if total + len(piece) > max_chars:
+                    break
+                parts.append(piece)
+                total += len(piece)
+            return "".join(parts)
+
         with st.spinner("Retrieving context and generating answer..."):
             try:
+                # Retrieval
                 snippets = rag.retrieve(
-                    question, top_k=top_k, min_score=min_score, fetch_k=max(top_k * 8, 32)
+                    user_msg, top_k=top_k, min_score=min_score, fetch_k=max(top_k * 8, 32)
                 )
                 if not snippets:
-                    st.warning("No relevant content found in the textbook.")
+                    assistant_msg = "No relevant content found in the textbook."
                 else:
                     # Build context
                     def build_context(snips: List[Dict], max_chars: int = 2500) -> str:
@@ -299,21 +331,43 @@ with ask_tab:
 
                     context = build_context(snippets, max_chars=2500)
                     sources = list({s["source"] for s in snippets})
+                    conversation = format_conversation(st.session_state.messages)
 
+                    # Generate
                     try:
-                        user_prompt = PROMPT_TEMPLATE.format(context=context, question=question)
+                        user_prompt = PROMPT_TEMPLATE.format(
+                            context=context,
+                            conversation=conversation,
+                            question=user_msg,
+                        )
                         answer = hf_generate(PROMPT_SYSTEM, user_prompt, max_new_tokens=512, temperature=0.2).strip()
                         answer = force_citations(answer, sources)
                     except Exception:
-                        answer = extractive_answer(rag, question, snippets, k_sent=5)
+                        answer = extractive_answer(rag, user_msg, snippets, k_sent=5)
 
-                    st.markdown("### Answer")
-                    st.write(answer)
-                    with st.expander("Sources"):
-                        for s in sources:
-                            st.write("- " + s)
+                    assistant_msg = answer
+
+                # Show assistant message
+                with st.chat_message("assistant"):
+                    st.markdown(assistant_msg)
+                    if snippets:
+                        with st.expander("Sources"):
+                            for s in list({x["source"] for x in snippets}):
+                                st.write("- " + s)
+
+                # Save to history
+                st.session_state.messages.append({"role": "assistant", "content": assistant_msg})
             except Exception as e:
                 st.error(f"Error: {e}")
+
+    # Toolbar for history
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Clear chat history"):
+            st.session_state.messages = []
+            st.experimental_rerun()
+    with col_b:
+        st.caption("Chat uses retrieval each turn; answers remain context-grounded with citations.")
 
 st.divider()
 st.caption("Index files: faiss_index.bin, metadata.json. They will be created in the working directory.")
