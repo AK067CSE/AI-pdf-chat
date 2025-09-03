@@ -55,25 +55,24 @@ def hf_generate(system_prompt: str, user_prompt: str,
         return out[len(prompt):].strip() if out.startswith(prompt) else out.strip()
     return str(data).strip()
 
-# =========================== Prompt (RAG with strict citations) ===========================
+# =========================== Prompt (Conversational, no citations) ===========================
 PROMPT_SYSTEM = (
-    "You are a precise assistant. Answer ONLY using the provided context.\n"
-    "If the answer is not in the context, reply exactly: 'I could not find the answer in the textbook.'\n"
-    "Always include 1–3 inline citations in the form (source|page[#chunk]) when possible."
+    "You are a helpful assistant that acts like ChatGPT for the user's data.\n"
+    "Answer conversationally and comprehensively based ONLY on the provided Context (use Conversation only to resolve follow-ups).\n"
+    "If the information is not in the Context, reply exactly: 'I could not find the answer in the provided materials.'\n"
+    "Write detailed, clear, multi-paragraph answers that a non-expert can understand.\n"
+    "Do NOT include citations or source markers. Do not mention limitations; simply answer with what the Context supports."
 )
 
 PROMPT_TEMPLATE = """Context:
 {context}
 
-Task:
-- Provide a concise answer (≤ 6 sentences) strictly based on the context.
-- Use plain English.
-- Include 1–3 citations like (source|p#) when applicable.
-- If the context does not contain the answer, reply exactly:
-  "I could not find the answer in the textbook."
+Question:
+{question}
 
-Question: {question}
-Answer:
+Instructions:
+- Rely strictly on the Context. If insufficient, reply exactly: "I could not find the answer in the provided materials."\n
+Now produce a clear, thorough, and conversational answer for the user. Avoid citations or source markers.
 """
 
 def force_citations(answer: str, sources: List[str]) -> str:
@@ -338,12 +337,12 @@ async def ask_question(req: QuestionRequest):
         # 3) Generate answer with HF LLM if possible; otherwise extractive fallback
         try:
             user_prompt = PROMPT_TEMPLATE.format(context=context, question=req.question)
-            answer = hf_generate(PROMPT_SYSTEM, user_prompt, max_new_tokens=512, temperature=0.2).strip()
-            answer = force_citations(answer, sources)
+            answer = hf_generate(PROMPT_SYSTEM, user_prompt, max_new_tokens=768, temperature=0.3).strip()
         except Exception:
-            answer = extractive_answer(req.question, snippets, k_sent=5)
+            # Fallback extractive answer, more detailed
+            answer = extractive_answer(req.question, snippets, k_sent=7)
 
-        return {"answer": answer, "sources": sources}
+        return {"answer": answer}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -382,8 +381,8 @@ HTML_PAGE = """
   </style>
 </head>
 <body>
-  <h1>RAG + HuggingFace LLM Q&A</h1>
-  <div class="muted">1) Upload a PDF. 2) Ask a question. Answers will cite sources. If HF key is missing, it falls back to extractive mode.</div>
+  <h1>Chat with your documents</h1>
+  <div class="muted">You can think of this as ChatGPT for your data: upload PDFs and ask questions. Answers are comprehensive and conversational, based only on your uploaded content.</div>
 
   <div class="card">
     <h3>Upload PDF</h3>
@@ -410,7 +409,6 @@ HTML_PAGE = """
     <div class="divider"></div>
     <div id="result">
       <div class="answer"></div>
-      <div class="sources"></div>
     </div>
   </div>
 
@@ -444,11 +442,11 @@ HTML_PAGE = """
       const minscore = parseFloat(document.getElementById('minscore').value || '0.30');
       const msg = document.getElementById('askMsg');
       const answerEl = document.querySelector('#result .answer');
-      const sourcesEl = document.querySelector('#result .sources');
+
       if (!q) { alert('Enter a question.'); return; }
 
       msg.textContent = 'Retrieving...'; askBtn.disabled = true;
-      answerEl.textContent = ''; sourcesEl.innerHTML = '';
+      answerEl.textContent = '';
 
       try {
         const resp = await fetch('/ask', {
@@ -459,9 +457,6 @@ HTML_PAGE = """
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || 'Request failed');
         answerEl.textContent = data.answer || '(No answer)';
-        if (data.sources && data.sources.length) {
-          sourcesEl.innerHTML = data.sources.map(s => `<span class="badge">${s}</span>`).join('');
-        }
         msg.textContent = 'Done';
       } catch (e) {
         msg.textContent = 'Error: ' + e.message;
