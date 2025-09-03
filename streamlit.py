@@ -198,72 +198,73 @@ with ingest_tab:
             st.success(f"Ingested {len(pdf_files)} file(s), pages: {total_pages}, chunks added: {total_chunks}")
 
     st.divider()
-    st.subheader("Ingest Tarot JSON")
-    json_file = st.file_uploader("Upload a tarot JSON file", type=["json"], accept_multiple_files=False)
-    if st.button("Process JSON") and json_file:
+    st.subheader("Ingest JSON (any)")
+    json_file = st.file_uploader("Upload a JSON file", type=["json"], accept_multiple_files=False)
+    raw_json_text = st.text_area("Or paste raw JSON", placeholder="{}", height=150)
+    if st.button("Process JSON"):
+        data = None
+        source_name = ""
+        # Determine source: file or pasted text
         try:
-            raw = json_file.read()
-            data = json.loads(raw)
+            if json_file is not None:
+                raw = json_file.read()
+                data = json.loads(raw)
+                source_name = json_file.name
+            elif raw_json_text.strip():
+                data = json.loads(raw_json_text)
+                source_name = "pasted_json"
+            else:
+                st.warning("Please upload a JSON file or paste JSON.")
         except Exception as e:
             st.error(f"Invalid JSON: {e}")
             data = None
 
-        def norm(x):
-            if x is None:
-                return ""
-            if isinstance(x, list):
-                return "；".join([str(i) for i in x if i])
-            return str(x)
+        # Generic JSON -> documents
+        def scalar_to_str(x):
+            if isinstance(x, str):
+                return x
+            try:
+                return json.dumps(x, ensure_ascii=False)
+            except Exception:
+                return str(x)
+
+        def walk(node, path: str, docs_out: List[Dict]):
+            # Recursively traverse JSON and create docs per scalar leaf
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    new_path = f"{path}.{k}" if path else str(k)
+                    walk(v, new_path, docs_out)
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    new_path = f"{path}[{i}]" if path else f"[{i}]"
+                    walk(v, new_path, docs_out)
+            else:
+                # Scalar leaf
+                if isinstance(node, str) and len(node) > 700:
+                    # Chunk long strings for better retrieval
+                    for j, chunk in enumerate(split_text(node, size=700, overlap=120)):
+                        if chunk.strip():
+                            docs_out.append({
+                                "text": f"[{path}]\n{chunk}",
+                                "source": f"{source_name}|{path}#{j}"
+                            })
+                else:
+                    text = f"[{path}] {scalar_to_str(node)}"
+                    docs_out.append({
+                        "text": text,
+                        "source": f"{source_name}|{path}"
+                    })
 
         if data is not None:
-            docs = []
             try:
-                if isinstance(data, dict) and "cards" in data and isinstance(data["cards"], list):
-                    for c in data["cards"]:
-                        name = norm(c.get("name") or c.get("name_short") or c.get("value") or "Unknown")
-                        desc = norm(c.get("desc"))
-                        suit = norm(c.get("suit") or c.get("type"))
-                        kw_up = norm(c.get("keywords") or c.get("keywords_up"))
-                        kw_rev = norm(c.get("keywords_rev"))
-                        up = norm(c.get("meaning_up") or c.get("meanings", {}).get("upright"))
-                        rev = norm(c.get("meaning_rev") or c.get("meanings", {}).get("reversed"))
-
-                        text_up = f"# {name} (Upright)\nSuit/Type: {suit}\nKeywords: {kw_up}\nMeaning: {up}\nDesc: {desc}"
-                        docs.append({"text": text_up, "source": f"{json_file.name}|{name}|upright"})
-
-                        if up or rev or kw_rev:
-                            text_rev = f"# {name} (Reversed)\nSuit/Type: {suit}\nKeywords: {kw_rev}\nMeaning: {rev}\nDesc: {desc}"
-                            docs.append({"text": text_rev, "source": f"{json_file.name}|{name}|reversed"})
-
-                elif isinstance(data, dict) and "tarot_interpretations" in data and isinstance(data["tarot_interpretations"], list):
-                    for c in data["tarot_interpretations"]:
-                        name = norm(c.get("name", "Unknown"))
-                        fortune = norm(c.get("fortune_telling", []))
-                        light = norm((c.get("meanings") or {}).get("light", []))
-                        shadow = norm((c.get("meanings") or {}).get("shadow", []))
-                        text_up = f"# {name} (Upright)\nLight: {light}\nFortune: {fortune}"
-                        text_rev = f"# {name} (Reversed)\nShadow: {shadow}\nFortune: {fortune}"
-                        docs.append({"text": text_up, "source": f"{json_file.name}|{name}|upright"})
-                        docs.append({"text": text_rev, "source": f"{json_file.name}|{name}|reversed"})
-
-                elif isinstance(data, list):
-                    for c in data:
-                        name = norm(c.get("name", "Unknown"))
-                        up = norm(c.get("meaning_up") or c.get("upright") or (c.get("meanings") or {}).get("upright"))
-                        rev = norm(c.get("meaning_rev") or c.get("reversed") or (c.get("meanings") or {}).get("reversed"))
-                        desc = norm(c.get("desc"))
-                        text_up = f"# {name} (Upright)\nMeaning: {up}\nDesc: {desc}"
-                        docs.append({"text": text_up, "source": f"{json_file.name}|{name}|upright"})
-                        if rev:
-                            text_rev = f"# {name} (Reversed)\nMeaning: {rev}\nDesc: {desc}"
-                            docs.append({"text": text_rev, "source": f"{json_file.name}|{name}|reversed"})
+                docs: List[Dict] = []
+                walk(data, path="", docs_out=docs)
+                if not docs:
+                    st.warning("No scalar values found to index in the provided JSON.")
                 else:
-                    st.error("Unsupported JSON structure for tarot cards.")
-
-                if docs:
                     rag.add_documents(docs)
                     rag.save()
-                    st.success(f"Ingested {len(docs)} tarot entries from JSON.")
+                    st.success(f"Ingested {len(docs)} JSON entries from {source_name}.")
             except Exception as e:
                 st.error(f"Failed processing JSON: {e}")
 
