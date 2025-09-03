@@ -6,4 +6,5 @@ sentence-transformers
 pypdf
 requests
 pydantic
+dotenv
 python-multipart
